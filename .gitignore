@@ -1,0 +1,8 @@
+# Arquivos pessoais do Xcode (cada pessoa tem os seus)
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# macOS
+.DS_Store
