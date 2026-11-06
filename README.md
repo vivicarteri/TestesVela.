@@ -9,8 +9,8 @@ Testes técnicos e estéticos do app do **Time Ada Lovelace** no Challenge 4 ("O
 | Aba | Arquivo | O que testa |
 | --- | --- | --- |
 | **2D** | `ContentView.swift` (`VelaRealistaView`) | Vela desenhada em 2D, com luz, cera escorrendo e a sombra de um passarinho que cresce com o tempo |
-| **3D** | `RealityVelaView.swift` | A vela em 3D com RealityKit, com sombras de verdade na parede |
-| **Caixa** | `CaixaVelaView.swift` | A vela dentro de uma caixa com estrelas recortadas que gira devagar. O botão "Sair da caixa" leva a câmera para fora, pela janela da caixa, mostrando as estrelas de luz no quarto |
+| **3D** | `RealityVelaView.swift`, `CeraSimulacao.swift` e `CeraEntidades.swift` | A vela em 3D com RealityKit, com sombras de verdade na parede. A cera tem física: poça no topo sempre reta com o chão, pingos que escorrem e pingam para o lado contrário da chama, gotas que acumulam em montinhos no prato, na mesa e na parede, e a chama que derrete a borda em que encosta (e apaga se entrar na cera). No simulador, arrastar a vela inclina e dois toques endireitam |
+| **Caixa** | `CaixaVelaView.swift` | A vela dentro de uma caixa com estrelas recortadas que gira devagar. O botão "Sair da caixa" leva a câmera para fora, pela janela da caixa, mostrando as estrelas de luz no quarto. A cera tem a mesma física da aba 3D: as gotas caem no fundo, nas paredes (e giram junto com a caixa) ou na tampa |
 
 Todas as abas têm o mesmo timer:
 

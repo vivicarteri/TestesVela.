@@ -9,8 +9,19 @@
 //  - A luz que faz as sombras é firme (não treme), como a pesquisa sugeriu.
 //    Só a chama e o brilho em volta dela tremem de leve.
 //  - Prego: cai no prato na metade do tempo (com a vibração do Prego.ahap).
-//  - Chama sempre para cima, virar o celular apaga, inclinar derrete mais rápido:
-//    igual à versão 2D (usa o Movimento e o Haptics que já estão no ContentView).
+//  - A cera tem física de verdade (CeraSimulacao.swift, desenhada pelo CeraEntidades.swift):
+//    • a chama derrete o topo e forma uma poça; a superfície da poça fica sempre reta em relação ao chão de verdade;
+//    • quando a poça enche, transborda pelo ponto mais baixo da borda e os pingos escorrem pela vela,
+//      esfriam e endurecem; por onde um pingo passa fica um canal, e os próximos tendem a sair por ali;
+//    • inclinando o celular (para os lados, para frente ou para trás), a cera escorre e pinga para o lado
+//      contrário da chama, cai no prato, na mesa ou na parede e vai acumulando em montinhos (com uma vibração leve);
+//    • a chama e a vela são dois objetos: a chama sempre aponta para cima no mundo e derrete (destrói) a borda
+//      em que encosta; se ela entra na cera ou o pavio afunda na poça (celular muito virado), ela é abafada e apaga.
+//  - Para frente e para trás, conta como "em pé" o jeito que o celular estava quando a vela foi acesa
+//    (assim dá para segurar o celular do jeito que for confortável).
+//  - Virar o celular de cabeça para baixo também apaga, e inclinar faz derreter mais rápido.
+//    (Usa o Movimento e o Haptics que estão no ContentView.)
+//  - No simulador não tem sensor: arrastar a vela inclina o "celular" e dois toques endireitam.
 //
 //  Precisa de iOS 18 ou mais novo (RealityView com câmera virtual).
 
@@ -28,30 +39,46 @@ struct RealityVelaView: View {
     @State private var tamanho: TamanhoVela = .media
     @State private var estado: Estado = .apagada
     @State private var queimado: TimeInterval = 0
-    @State private var agora = Date()
     @State private var ultimoTick = Date()
     @State private var pregoCaiu = false
+    @State private var ultimoPingo = Date.distantPast   // para não vibrar demais com muitas gotas juntas
+    #if targetEnvironment(simulator)
+    @State private var rolagemSimulada: Double = 0
+    @State private var arfagemSimulada: Double = 0
+    #endif
 
-    // 30 vezes por segundo: atualiza a cena (chama tremendo, vela derretendo)
+    // 30 vezes por segundo: anda a física da cera e atualiza a cena (chama tremendo, vela derretendo)
     private let relogio = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     private var progresso: Double { min(1, queimado / tamanho.duracao) }
-    private var inclinado: Bool { abs(movimento.angulo) > 0.45 }
     private var alturaEmMetros: Float { Float(tamanho.altura) / 1500 }   // pequena 13 cm, média 19 cm, grande 24 cm
+
+    private var inclinado: Bool { movimento.inclinacao > 0.45 }
 
     var body: some View {
         ZStack(alignment: .bottom) {
             RealityView { content in
                 content.camera = .virtual          // 3D na tela, sem câmera do celular (sem AR)
                 content.add(cena.raiz)
-            } update: { _ in
-                cena.atualizar(agora: agora,
-                               progresso: Float(progresso),
-                               acesa: estado == .acesa,
-                               alturaCheia: alturaEmMetros,
-                               angulo: Float(movimento.angulo))
             }
             .ignoresSafeArea()
+            #if targetEnvironment(simulator)
+            // Simulador: arrastar para os lados inclina para os lados; para cima e para baixo, para trás e para frente
+            .gesture(DragGesture(minimumDistance: 4)
+                .onChanged { v in
+                    movimento.simular(rolagem: rolagemSimulada + v.translation.width / 90,
+                                      arfagem: arfagemSimulada - v.translation.height / 90)
+                }
+                .onEnded { v in
+                    rolagemSimulada += v.translation.width / 90
+                    arfagemSimulada -= v.translation.height / 90
+                })
+            .onTapGesture(count: 2) {
+                rolagemSimulada = 0
+                arfagemSimulada = 0
+                movimento.simular(rolagem: 0, arfagem: 0)
+            }
+            #endif
             .accessibilityElement()
             .accessibilityLabel("Vela \(tamanho.rawValue.lowercased())")
             .accessibilityValue(textoEstado)
@@ -98,6 +125,13 @@ struct RealityVelaView: View {
                         .tint(.white)
                 }
             }
+
+            #if targetEnvironment(simulator)
+            Text("Simulador: arraste a vela para inclinar (lados, frente e trás). Dois toques endireitam.")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.6))
+                .multilineTextAlignment(.center)
+            #endif
         }
         .padding()
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
@@ -126,7 +160,9 @@ struct RealityVelaView: View {
             queimado = 0
             pregoCaiu = false
             cena.recolocarPrego()
+            cena.cera.reiniciar(alturaCheia: alturaEmMetros)
         }
+        movimento.calibrar()
         estado = .acesa
         ultimoTick = Date()
         haptics.acender()
@@ -147,16 +183,40 @@ struct RealityVelaView: View {
         queimado = 0
         pregoCaiu = false
         cena.recolocarPrego()
+        cena.cera.reiniciar(alturaCheia: alturaEmMetros)
     }
 
     private func atualizar(_ data: Date) {
-        agora = data   // faz o RealityView atualizar a cena
         defer { ultimoTick = data }
+
+        // A física da cera e a cena andam sempre (a cera esfria e escorre mesmo com a vela apagada)
+        cena.atualizar(agora: data,
+                       progresso: Float(progresso),
+                       acesa: estado == .acesa,
+                       alturaCheia: alturaEmMetros,
+                       gravidade: movimento.gravidadeNaCena)
+
+        // Gotas de cera batendo no prato, na mesa ou na parede: uma batidinha leve
+        if cena.cera.batidas > 0 {
+            cena.cera.batidas = 0
+            if data.timeIntervalSince(ultimoPingo) > 0.07 {
+                ultimoPingo = data
+                haptics.pingo()
+            }
+        }
+
         guard estado == .acesa else { return }
+
+        // A chama encostou na cera (ou afundou na poça) tempo demais: ela apaga
+        if cena.cera.apagouPorColisao {
+            cena.cera.apagouPorColisao = false
+            apagar()
+            return
+        }
 
         let passou = min(0.5, data.timeIntervalSince(ultimoTick))
         queimado += passou * (inclinado ? 2.5 : 1)
-        haptics.atualizarChama(inclinacao: Float(min(1, abs(movimento.angulo))))
+        haptics.atualizarChama(inclinacao: Float(min(1, movimento.inclinacao)))
 
         if progresso >= 0.5 && !pregoCaiu {
             pregoCaiu = true
@@ -177,24 +237,34 @@ struct RealityVelaView: View {
 @MainActor
 final class CenaVela {
     let raiz = Entity()
+    let cera: CeraSimulacao
 
-    private let vela: ModelEntity
     private let pavio: ModelEntity
-    private let pivoChama = Entity()   // ponto de giro da chama (na ponta do pavio)
+    private let pivoChama = Entity()       // ponto de giro da chama (na ponta do pavio)
     private let prego = Entity()
-    private let luzSombra = SpotLight() // luz firme que faz as sombras na parede
-    private let luzChama = PointLight() // brilho quente em volta da chama
-    private var brilho: Float = 0       // 0 = apagada, 1 = acesa (sobe e desce devagar)
+    private let luzSombra = SpotLight()    // luz firme que faz as sombras na parede
+    private let luzChama = PointLight()    // brilho quente em volta da chama
+    private var brilho: Float = 0          // 0 = apagada, 1 = acesa (sobe e desce devagar)
     private var pregoCaindo = false
+
+    private let desenhoCera: CeraEntidades  // a vela, a poça, os pingos e os montinhos (CeraEntidades.swift)
 
     private let alturaPrato: Float = 0.006
     private let raioVela: Float = 0.035
 
     init() {
-        // Câmera: olhando a mesa de frente, um pouco de cima
+        // Física da cera. Onde as gotas podem cair (o zero é a base da vela, em cima do prato):
+        cera = CeraSimulacao()
+        cera.superficies = [
+            .init(ponto: [0, 0, 0], normal: [0, 1, 0], raio: 0.07),             // prato
+            .init(ponto: [0, -alturaPrato, 0], normal: [0, 1, 0], raio: nil),   // mesa
+            .init(ponto: [0, 0, -0.45], normal: [0, 0, 1], raio: nil)           // parede do fundo
+        ]
+
+        // Câmera: olhando a mesa de frente e de cima o bastante para ver a poça no topo da vela
         let camera = PerspectiveCamera()
         camera.camera.fieldOfViewInDegrees = 40
-        camera.look(at: [0, 0.12, -0.15], from: [0, 0.2, 0.7], relativeTo: nil)
+        camera.look(at: [0, 0.05, -0.1], from: [0, 0.3, 0.6], relativeTo: nil)
         raiz.addChild(camera)
 
         // Mesa
@@ -216,11 +286,11 @@ final class CenaVela {
         prato.position = [0, alturaPrato / 2, 0]
         raiz.addChild(prato)
 
-        // Vela: um cilindro de altura 1 que a gente "achata" (escala) conforme derrete
-        vela = ModelEntity(mesh: .generateCylinder(height: 1, radius: raioVela),
-                           materials: [SimpleMaterial(color: UIColor(red: 0.96, green: 0.92, blue: 0.85, alpha: 1),
-                                                      roughness: 0.6, isMetallic: false)])
-        raiz.addChild(vela)
+        // Vela, poça, pingos e montinhos (o zero do desenho é a base da vela, em cima do prato)
+        desenhoCera = CeraEntidades(cera: cera, corCera: UIColor(red: 0.96, green: 0.92, blue: 0.85, alpha: 1),
+                                    rugosidade: 0.6)
+        desenhoCera.raiz.position = [0, alturaPrato, 0]
+        raiz.addChild(desenhoCera.raiz)
 
         // Pavio
         pavio = ModelEntity(mesh: .generateCylinder(height: 0.012, radius: 0.0012),
@@ -296,37 +366,45 @@ final class CenaVela {
     }
 
     // Chamado 30 vezes por segundo
-    func atualizar(agora: Date, progresso: Float, acesa: Bool, alturaCheia: Float, angulo: Float) {
+    func atualizar(agora: Date, progresso: Float, acesa: Bool, alturaCheia: Float, gravidade: SIMD3<Float>) {
         let t = Float(agora.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 10_000))
 
         // A chama acende e apaga devagar
         let alvo: Float = acesa ? 1 : 0
         brilho += (alvo - brilho) * 0.15
 
-        // Vela derretendo: a altura diminui e tudo que está em cima desce junto
+        // Vela derretendo: a altura (o timer) diminui e a física da cera faz o resto
         let alturaAtual = alturaCheia * max(0.06, 1 - progresso)
-        vela.scale = [1, alturaAtual, 1]
-        vela.position = [0, alturaPrato + alturaAtual / 2, 0]
-        let topo = alturaPrato + alturaAtual
-        pavio.position = [0, topo + 0.006, 0]
+        cera.passo(.init(agora: agora, alturaCheia: alturaCheia, alturaPavio: alturaAtual,
+                         brilho: brilho, acesa: acesa, gravidade: gravidade))
+        desenhoCera.atualizar(brilho: brilho)
 
-        // Chama: na ponta do pavio, sempre para cima, tremendo de leve
+        // Pavio: sai do fundo da poça e vai até a ponta, onde fica a chama
+        let pivo = cera.pivoDaChama(alturaPavio: alturaAtual) + SIMD3(0, alturaPrato, 0)
+        let fundo = alturaPrato + cera.topo[0] - 0.001
+        let comprimento = max(0.004, pivo.y - fundo)
+        pavio.scale = [1, comprimento / 0.012, 1]
+        pavio.position = [0, fundo + comprimento / 2, 0]
+
+        // Chama: na ponta do pavio, SEMPRE para cima no mundo (mesmo com o celular virado), tremendo de leve.
+        // Quando encosta na cera, vai sendo abafada e encolhe.
+        let cima = cera.cima
         let n1 = ruido(t)
         let n2 = ruido(t * 1.7 + 10)
-        pivoChama.position = [0, topo + 0.012, 0]
-        pivoChama.orientation = simd_quatf(angle: -max(-1, min(1, angulo)), axis: [0, 0, 1])
-        let tamanhoChama = max(0.001, brilho)
+        pivoChama.position = pivo
+        pivoChama.orientation = CeraEntidades.girar(de: [0, 1, 0], para: cima)
+        let tamanhoChama = max(0.001, brilho * (1 - 0.6 * cera.abafamento))
         pivoChama.scale = [tamanhoChama * (1 - 0.05 * n2), tamanhoChama * (1 + 0.1 * n1), tamanhoChama]
         pivoChama.isEnabled = brilho > 0.02
 
         // Brilho em volta: treme só um pouquinho
-        luzChama.position = [0, topo + 0.03, 0.02]
+        luzChama.position = pivo + cima * 0.018 + SIMD3(0, 0, 0.02)
         luzChama.light.intensity = 1500 * brilho * (1 + 0.04 * n1)
 
         // Luz das sombras: FIRME (não treme), sai da chama e aponta para a parede.
         // Como ela desce junto com a vela, as sombras sobem e crescem na parede.
-        let origem: SIMD3<Float> = [0, topo + 0.02, 0]
-        luzSombra.look(at: [0, topo + 0.02, -0.45], from: origem, relativeTo: nil)
+        let origem = pivo + cima * 0.008
+        luzSombra.look(at: [origem.x, origem.y, -0.45], from: origem, relativeTo: nil)
         luzSombra.light.intensity = 6000 * brilho
 
         // Prego espetado na metade da vela (até cair)
@@ -338,10 +416,15 @@ final class CenaVela {
     // O prego cai no prato em 0,45 s (o mesmo tempo da batida no Prego.ahap)
     func derrubarPrego() {
         pregoCaindo = true
+        prego.move(to: pregoNoPrato, relativeTo: raiz, duration: Haptics.tempoQueda, timingFunction: .easeIn)
+    }
+
+    // Onde o prego fica depois de cair
+    private var pregoNoPrato: Transform {
         var destino = prego.transform
         destino.translation = [0.05, alturaPrato + 0.004, 0.03]
         destino.rotation = simd_quatf(angle: 0.8, axis: [0, 1, 0])
-        prego.move(to: destino, relativeTo: raiz, duration: Haptics.tempoQueda, timingFunction: .easeIn)
+        return destino
     }
 
     func recolocarPrego() {

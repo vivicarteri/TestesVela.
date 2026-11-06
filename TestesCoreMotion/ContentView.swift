@@ -517,9 +517,51 @@ final class Movimento: ObservableObject {
     @Published var invertido = false
     @Published var angulo: Double = 0   // para onde fica "para cima" no mundo (em radianos)
 
+    // Para a física da cera da aba 3D: a gravidade inteira, em 3D, sem limite nenhum.
+    // Coordenadas do celular: x para a direita, y para o alto da tela, z saindo da tela.
+    // Em pé normal: (0, -1, 0). Deitado de costas na mesa: (0, 0, -1).
+    @Published var gravidade3D = SIMD3<Double>(0, -1, 0)
+
+    // Para frente e para trás, conta como "em pé" o jeito que o celular estava quando a vela foi acesa
+    // (assim dá para segurar o celular do jeito que for confortável). Para os lados não precisa:
+    // todo mundo segura o celular reto para os lados.
+    private(set) var arfagemBase: Double = 0
+
+    /// A gravidade nas coordenadas das cenas 3D (y para cima, z para a câmera), de tamanho 1,
+    /// já descontando o jeito que o celular estava (frente/trás) quando a vela foi acesa.
+    var gravidadeNaCena: SIMD3<Float> {
+        let g = gravidade3D
+        let c = cos(arfagemBase), s = sin(arfagemBase)
+        let v = SIMD3<Float>(Float(g.x), Float(g.y * c + g.z * s), Float(-g.y * s + g.z * c))
+        let n = (v * v).sum().squareRoot()
+        return n > 0.01 ? v / n : SIMD3(0, -1, 0)
+    }
+
+    /// Quanto a vela está inclinada em relação ao "para cima" do mundo (0 = reta, π = de cabeça para baixo).
+    var inclinacao: Double { Double(acos(max(-1, min(1, -gravidadeNaCena.y)))) }
+
+    /// O jeito que o celular está agora (para frente ou para trás) passa a ser o "em pé".
+    func calibrar() {
+        #if !targetEnvironment(simulator)
+        let g = gravidade3D
+        guard hypot(g.y, g.z) > 0.5 else { return }    // celular deitado de lado: deixa como estava
+        arfagemBase = max(0, min(.pi / 2, atan2(-g.z, -g.y)))
+        #endif
+    }
+
     #if os(iOS)
     private let manager = CMMotionManager()
     private var mudouEm: Date?
+    #endif
+
+    // No simulador não tem sensor: a aba 3D finge a inclinação quando arrastamos o dedo.
+    // rolagem = girar para os lados, arfagem = deitar para trás (positivo) ou para frente.
+    #if targetEnvironment(simulator)
+    func simular(rolagem a: Double, arfagem b: Double) {
+        gravidade3D = SIMD3(-sin(a) * cos(b), -cos(a) * cos(b), -sin(b))
+        angulo = max(-1.2, min(1.2, atan2(sin(a), cos(a))))
+        invertido = gravidade3D.y > 0.8
+    }
     #endif
 
     func iniciar() {
@@ -534,6 +576,11 @@ final class Movimento: ObservableObject {
             // Suavizado, para a chama não dar pulos.
             let alvo = max(-1.2, min(1.2, atan2(-g.x, -g.y)))
             self.angulo += (alvo - self.angulo) * 0.2
+
+            // A gravidade em 3D, suavizada do mesmo jeito (e sempre com tamanho 1)
+            var g3 = self.gravidade3D + (SIMD3(g.x, g.y, g.z) - self.gravidade3D) * 0.25
+            let tamanho = (g3 * g3).sum().squareRoot()
+            if tamanho > 0.01 { g3 /= tamanho; self.gravidade3D = g3 }
 
             // Em pé normal: g.y ≈ -1. De cabeça para baixo: g.y ≈ +1.
             // (Para testar "tela virada para baixo na mesa", troquem por: g.z > 0.8)
@@ -705,6 +752,22 @@ final class Haptics {
                 .start(atTime: CHHapticTimeImmediate)
         } catch {
             print("Erro no tique: \(error)")
+        }
+    }
+
+    // Gota de cera batendo no prato ou na mesa (aba 3D): bem fraquinha e "seca"
+    func pingo() {
+        guard suportado, let engine else { return }
+        do {
+            try ligarSePreciso()
+            let evento = CHHapticEvent(eventType: .hapticTransient, parameters: [
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.25),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.9)
+            ], relativeTime: 0)
+            try engine.makePlayer(with: CHHapticPattern(events: [evento], parameters: []))
+                .start(atTime: CHHapticTimeImmediate)
+        } catch {
+            print("Erro no pingo: \(error)")
         }
     }
 
