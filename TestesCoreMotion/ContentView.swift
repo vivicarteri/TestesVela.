@@ -37,11 +37,19 @@ import AVFoundation
 // ⚠️ Precisa de iOS 18 ou mais novo (Minimum Deployments: 18.0)
 
 struct ContentView: View {
+    enum Aba { case vela2D, vela3D, caixa }
+
+    // A TabView deixa vivas as telas das abas que já foram abertas. Se a RealityView da Caixa
+    // continuar viva escondida, a da 3D aparece toda preta (e o contrário também): o RealityKit
+    // só desenha a primeira cena. Por isso cada aba 3D só monta a sua RealityView enquanto está
+    // na tela (o resto, como a vela acesa e o tempo, continua guardado).
+    @State private var aba = Aba.vela2D
+
     var body: some View {
-        TabView {
-            Tab("2D", systemImage: "flame") { VelaRealistaView() }
-            Tab("3D", systemImage: "cube") { RealityVelaView() }
-            Tab("Caixa", systemImage: "shippingbox") { CaixaVelaView() }
+        TabView(selection: $aba) {
+            Tab("2D", systemImage: "flame", value: Aba.vela2D) { VelaRealistaView() }
+            Tab("3D", systemImage: "cube", value: Aba.vela3D) { RealityVelaView(naTela: aba == .vela3D) }
+            Tab("Caixa", systemImage: "shippingbox", value: Aba.caixa) { CaixaVelaView(naTela: aba == .caixa) }
         }
     }
 }
@@ -89,6 +97,8 @@ struct VelaRealistaView: View {
     @State private var acendeuEm: Date?
     @State private var apagouEm: Date?
     @State private var pregoCaiuEm: Date?
+    @State private var naTelaAgora = false             // só a aba que está na tela apaga com o sopro
+    @State private var alturaTela: CGFloat = 800       // para saber a altura da chama na tela
 
     private let tick = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
@@ -104,6 +114,7 @@ struct VelaRealistaView: View {
                 }
             }
             .ignoresSafeArea()
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { alturaTela = $0 }
             .accessibilityElement()
             .accessibilityLabel("Vela \(tamanho.rawValue.lowercased())")
             .accessibilityValue(textoEstado)
@@ -123,9 +134,10 @@ struct VelaRealistaView: View {
             controles
         }
         .background(Color.black)
-        .onAppear { movimento.iniciar() }
-        .onDisappear { movimento.parar(); haptics.pararChama() }
+        .onAppear { naTelaAgora = true; movimento.iniciar() }
+        .onDisappear { naTelaAgora = false; movimento.parar(); haptics.pararChama() }
         .onReceive(tick) { agora in atualizar(agora) }
+        .onReceive(Sopro.compartilhado.soprou) { leitura in soprou(leitura) }
         // Como no exemplo da Apple: desliga o motor de vibração quando o app sai da tela
         // e liga de novo quando volta (economiza bateria).
         .onChange(of: fase) { _, novaFase in
@@ -176,6 +188,8 @@ struct VelaRealistaView: View {
                         .tint(.white)
                 }
             }
+
+            PainelSopro()
 
             if !haptics.suportado {
                 Text("Este aparelho não tem vibração (Core Haptics)")
@@ -236,6 +250,22 @@ struct VelaRealistaView: View {
         apagouEm = Date()
         haptics.pararChama()
         haptics.apagar()
+    }
+
+    // Alguém soprou no microfone (Sopro.swift): apaga como quando vira o celular
+    private func soprou(_ leitura: LeituraSopro) {
+        guard naTelaAgora else { return }
+        let apagou = estado == .acesa
+        if apagou { pausar() }
+        Sopro.compartilhado.registrar(leitura, aba: "2D", alturaChama: alturaDaChamaNaTela,
+                                      alturaVela: 1 - progresso, apagou: apagou)
+    }
+
+    // A mesma conta do desenho: onde fica o meio da chama, de baixo (0) para cima (1)
+    private var alturaDaChamaNaTela: Double {
+        let altura = max(16, tamanho.altura * CGFloat(1 - progresso))
+        let meioDaChama = alturaTela * 0.70 - 6 - altura - 14 - 22
+        return Double(1 - meioDaChama / max(1, alturaTela))
     }
 
     private func atualizar(_ agora: Date) {
@@ -638,8 +668,11 @@ final class Haptics {
     private func criarMotor() {
         guard suportado else { return }
         do {
-            // .ambient: o som do app não para a música da pessoa
-            try? AVAudioSession.sharedInstance().setCategory(.ambient)
+            // .ambient: o som do app não para a música da pessoa.
+            // Mas se o microfone estiver ligado (apagar soprando), o Sopro.swift já cuidou do áudio.
+            if !Sopro.compartilhado.ligado {
+                try? AVAudioSession.sharedInstance().setCategory(.ambient)
+            }
 
             let motor = try CHHapticEngine(audioSession: .sharedInstance())
 

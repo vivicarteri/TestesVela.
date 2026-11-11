@@ -29,6 +29,9 @@ import RealityKit
 struct CaixaVelaView: View {
     enum Estado { case apagada, acesa, pausada, fim }
 
+    /// Só monta a RealityView quando a aba está na tela (veja ContentView)
+    var naTela = true
+
     @StateObject private var movimento = Movimento()
     @State private var haptics = Haptics()
     @State private var cena = CenaCaixa()
@@ -40,6 +43,7 @@ struct CaixaVelaView: View {
     @State private var pregoCaiu = false
     @State private var fora = false
     @State private var ultimoPingo = Date.distantPast   // para não vibrar demais com muitas gotas juntas
+    @State private var naTelaAgora = false              // só a aba que está na tela apaga com o sopro
     #if targetEnvironment(simulator)
     @State private var rolagemSimulada: Double = 0
     @State private var arfagemSimulada: Double = 0
@@ -51,11 +55,27 @@ struct CaixaVelaView: View {
     private var inclinado: Bool { movimento.inclinacao > 0.45 }
     private var alturaEmMetros: Float { Float(tamanho.altura) / 1500 }
 
+    /// A cena que vai para uma RealityView nova. Na primeira vez é a própria `cena`. Nas outras
+    /// (voltando para esta aba) é uma cena com entidades NOVAS que continua de onde a antiga parou.
+    /// Entidades que já estiveram numa RealityView que sumiu não aparecem mais (a tela fica preta).
+    private func cenaParaMontar() -> CenaCaixa {
+        let nova = cena.montada ? CenaCaixa(continuando: cena) : cena
+        nova.montada = true
+        if nova !== cena { cena = nova }
+        return nova
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            RealityView { content in
-                content.camera = .virtual
-                content.add(cena.raiz)
+            Group {
+                if naTela {
+                    RealityView { content in
+                        content.camera = .virtual
+                        content.add(cenaParaMontar().raiz)
+                    }
+                } else {
+                    Color.black
+                }
             }
             .ignoresSafeArea()
             #if targetEnvironment(simulator)
@@ -82,9 +102,10 @@ struct CaixaVelaView: View {
             controles
         }
         .background(Color.black)
-        .onAppear { movimento.iniciar() }
-        .onDisappear { movimento.parar(); haptics.pararChama() }
+        .onAppear { naTelaAgora = true; movimento.iniciar() }
+        .onDisappear { naTelaAgora = false; movimento.parar(); haptics.pararChama() }
         .onReceive(relogio) { data in atualizar(data) }
+        .onReceive(Sopro.compartilhado.soprou) { leitura in soprou(leitura) }
         .onChange(of: movimento.invertido) { _, invertido in
             if invertido { apagar() }
         }
@@ -127,6 +148,8 @@ struct CaixaVelaView: View {
                 .buttonStyle(.bordered)
                 .tint(.orange)
             }
+
+            PainelSopro()
 
             #if targetEnvironment(simulator)
             Text("Simulador: arraste a vela para inclinar (lados, frente e trás). Dois toques endireitam.")
@@ -188,6 +211,15 @@ struct CaixaVelaView: View {
         cena.cera.reiniciar(alturaCheia: alturaEmMetros)
     }
 
+    // Alguém soprou no microfone (Sopro.swift): apaga a vela
+    private func soprou(_ leitura: LeituraSopro) {
+        guard naTelaAgora else { return }
+        let apagou = estado == .acesa
+        if apagou { apagar() }
+        Sopro.compartilhado.registrar(leitura, aba: "Caixa", alturaChama: Double(cena.alturaDaChamaNaTela),
+                                      alturaVela: max(0.06, 1 - progresso), apagou: apagou)
+    }
+
     private func atualizar(_ data: Date) {
         defer { ultimoTick = data }
 
@@ -242,8 +274,11 @@ final class CenaCaixa {
     let raiz = Entity()
 
     private let camera = PerspectiveCamera()
+    /// Onde a chama está na tela, de baixo (0) para cima (1). Serve para comparar com o sopro.
+    private(set) var alturaDaChamaNaTela: Float = 0.5
     private let caixa = Entity()            // tudo que gira junto (paredes, tampa, fundo)
     let cera: CeraSimulacao                 // a física da cera (CeraSimulacao.swift)
+    var montada = false                     // já foi colocada numa RealityView (veja cenaParaMontar)
     private let desenhoCera: CeraEntidades  // a vela, a poça, os pingos e os montinhos (CeraEntidades.swift)
     private let pavio: ModelEntity
     private let brilhoCera: ModelEntity
@@ -282,8 +317,10 @@ final class CenaCaixa {
     private let lenteDentro: Float = 70
     private let lenteFora: Float = 50
 
-    init() {
-        cera = CeraSimulacao()
+    /// `velha`: a cena da RealityView anterior. A nova continua de onde ela parou
+    /// (a mesma física da cera, o brilho, o giro da caixa, o prego), só que com entidades novas.
+    init(continuando velha: CenaCaixa? = nil) {
+        cera = velha?.cera ?? CeraSimulacao()
         camera.camera.fieldOfViewInDegrees = lenteDentro
         raiz.addChild(camera)
 
@@ -339,7 +376,7 @@ final class CenaCaixa {
         prego.addChild(cabeca)
         raiz.addChild(prego)
 
-        texturaLuz = CenaCaixa.texturaEstrelaDeLuz()
+        texturaLuz = velha?.texturaLuz ?? CenaCaixa.texturaEstrelaDeLuz()
         montarCaixa()
         raiz.addChild(caixa)
 
@@ -356,6 +393,17 @@ final class CenaCaixa {
         luzQuarto.light.attenuationRadius = 8
         luzQuarto.position = [0, 2.5, 3]
         raiz.addChild(luzQuarto)
+
+        if let velha {
+            ultimaData = velha.ultimaData
+            brilho = velha.brilho
+            zoom = velha.zoom
+            giro = velha.giro
+            if velha.pregoCaindo {
+                pregoCaindo = true
+                prego.transform = pregoNoChao
+            }
+        }
     }
 
     // MARK: Caixa com padrões
@@ -536,6 +584,7 @@ final class CenaCaixa {
 
         let giroAntes = giro
         girarEMoverCamera(dt: dt, fora: fora, centroChama: centroChama)
+        alturaDaChamaNaTela = camera.alturaNaTela(centroChama)
         var girou = giro - giroAntes
         if girou < -.pi { girou += 2 * .pi }
         cera.girarManchasNasParedes(girou)       // montinhos nas paredes giram junto com a caixa

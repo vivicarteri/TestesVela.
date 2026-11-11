@@ -32,6 +32,9 @@ import RealityKit
 struct RealityVelaView: View {
     enum Estado { case apagada, acesa, pausada, fim }
 
+    /// Só monta a RealityView quando a aba está na tela (veja ContentView)
+    var naTela = true
+
     @StateObject private var movimento = Movimento()
     @State private var haptics = Haptics()
     @State private var cena = CenaVela()
@@ -42,6 +45,7 @@ struct RealityVelaView: View {
     @State private var ultimoTick = Date()
     @State private var pregoCaiu = false
     @State private var ultimoPingo = Date.distantPast   // para não vibrar demais com muitas gotas juntas
+    @State private var naTelaAgora = false              // só a aba que está na tela apaga com o sopro
     #if targetEnvironment(simulator)
     @State private var rolagemSimulada: Double = 0
     @State private var arfagemSimulada: Double = 0
@@ -55,11 +59,27 @@ struct RealityVelaView: View {
 
     private var inclinado: Bool { movimento.inclinacao > 0.45 }
 
+    /// A cena que vai para uma RealityView nova. Na primeira vez é a própria `cena`. Nas outras
+    /// (voltando para esta aba) é uma cena com entidades NOVAS que continua de onde a antiga parou.
+    /// Entidades que já estiveram numa RealityView que sumiu não aparecem mais (a tela fica preta).
+    private func cenaParaMontar() -> CenaVela {
+        let nova = cena.montada ? CenaVela(continuando: cena) : cena
+        nova.montada = true
+        if nova !== cena { cena = nova }
+        return nova
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            RealityView { content in
-                content.camera = .virtual          // 3D na tela, sem câmera do celular (sem AR)
-                content.add(cena.raiz)
+            Group {
+                if naTela {
+                    RealityView { content in
+                        content.camera = .virtual          // 3D na tela, sem câmera do celular (sem AR)
+                        content.add(cenaParaMontar().raiz)
+                    }
+                } else {
+                    Color.black
+                }
             }
             .ignoresSafeArea()
             #if targetEnvironment(simulator)
@@ -86,9 +106,10 @@ struct RealityVelaView: View {
             controles
         }
         .background(Color.black)
-        .onAppear { movimento.iniciar() }
-        .onDisappear { movimento.parar(); haptics.pararChama() }
+        .onAppear { naTelaAgora = true; movimento.iniciar() }
+        .onDisappear { naTelaAgora = false; movimento.parar(); haptics.pararChama() }
         .onReceive(relogio) { data in atualizar(data) }
+        .onReceive(Sopro.compartilhado.soprou) { leitura in soprou(leitura) }
         .onChange(of: movimento.invertido) { _, invertido in
             if invertido { apagar() }
         }
@@ -125,6 +146,8 @@ struct RealityVelaView: View {
                         .tint(.white)
                 }
             }
+
+            PainelSopro()
 
             #if targetEnvironment(simulator)
             Text("Simulador: arraste a vela para inclinar (lados, frente e trás). Dois toques endireitam.")
@@ -186,6 +209,15 @@ struct RealityVelaView: View {
         cena.cera.reiniciar(alturaCheia: alturaEmMetros)
     }
 
+    // Alguém soprou no microfone (Sopro.swift): apaga a vela
+    private func soprou(_ leitura: LeituraSopro) {
+        guard naTelaAgora else { return }
+        let apagou = estado == .acesa
+        if apagou { apagar() }
+        Sopro.compartilhado.registrar(leitura, aba: "3D", alturaChama: Double(cena.alturaDaChamaNaTela),
+                                      alturaVela: max(0.06, 1 - progresso), apagou: apagou)
+    }
+
     private func atualizar(_ data: Date) {
         defer { ultimoTick = data }
 
@@ -232,6 +264,18 @@ struct RealityVelaView: View {
     }
 }
 
+// MARK: - Onde um ponto da cena aparece na tela (para comparar a altura da chama com a do sopro)
+
+extension PerspectiveCamera {
+    /// De baixo (0) para cima (1) da tela. A RealityView ocupa a tela toda e o ângulo da lente é na vertical.
+    func alturaNaTela(_ ponto: SIMD3<Float>) -> Float {
+        let p = transformMatrix(relativeTo: nil).inverse * SIMD4(ponto, 1)   // a câmera olha para -z
+        guard p.z < -0.001 else { return 0.5 }
+        let meiaLente = tan(camera.fieldOfViewInDegrees * .pi / 360)
+        return 0.5 + 0.5 * (p.y / -p.z) / meiaLente
+    }
+}
+
 // MARK: - A cena 3D
 
 @MainActor
@@ -248,21 +292,31 @@ final class CenaVela {
     private var pregoCaindo = false
 
     private let desenhoCera: CeraEntidades  // a vela, a poça, os pingos e os montinhos (CeraEntidades.swift)
+    var montada = false                     // já foi colocada numa RealityView (veja cenaParaMontar)
+
+    private let camera = PerspectiveCamera()
+    /// Onde a chama está na tela, de baixo (0) para cima (1). Serve para comparar com o sopro.
+    private(set) var alturaDaChamaNaTela: Float = 0.5
 
     private let alturaPrato: Float = 0.006
     private let raioVela: Float = 0.035
 
-    init() {
-        // Física da cera. Onde as gotas podem cair (o zero é a base da vela, em cima do prato):
-        cera = CeraSimulacao()
-        cera.superficies = [
-            .init(ponto: [0, 0, 0], normal: [0, 1, 0], raio: 0.07),             // prato
-            .init(ponto: [0, -alturaPrato, 0], normal: [0, 1, 0], raio: nil),   // mesa
-            .init(ponto: [0, 0, -0.45], normal: [0, 0, 1], raio: nil)           // parede do fundo
-        ]
+    /// `velha`: a cena da RealityView anterior. A nova continua de onde ela parou
+    /// (a mesma física da cera, o mesmo brilho, o prego no mesmo lugar), só que com entidades novas.
+    init(continuando velha: CenaVela? = nil) {
+        if let velha {
+            cera = velha.cera
+        } else {
+            // Física da cera. Onde as gotas podem cair (o zero é a base da vela, em cima do prato):
+            cera = CeraSimulacao()
+            cera.superficies = [
+                .init(ponto: [0, 0, 0], normal: [0, 1, 0], raio: 0.07),             // prato
+                .init(ponto: [0, -alturaPrato, 0], normal: [0, 1, 0], raio: nil),   // mesa
+                .init(ponto: [0, 0, -0.45], normal: [0, 0, 1], raio: nil)           // parede do fundo
+            ]
+        }
 
         // Câmera: olhando a mesa de frente e de cima o bastante para ver a poça no topo da vela
-        let camera = PerspectiveCamera()
         camera.camera.fieldOfViewInDegrees = 40
         camera.look(at: [0, 0.05, -0.1], from: [0, 0.3, 0.6], relativeTo: nil)
         raiz.addChild(camera)
@@ -363,6 +417,14 @@ final class CenaVela {
         luzQuarto.light.attenuationRadius = 3
         luzQuarto.position = [0, 0.6, 0.6]
         raiz.addChild(luzQuarto)
+
+        if let velha {
+            brilho = velha.brilho
+            if velha.pregoCaindo {
+                pregoCaindo = true
+                prego.transform = pregoNoPrato
+            }
+        }
     }
 
     // Chamado 30 vezes por segundo
@@ -396,6 +458,7 @@ final class CenaVela {
         let tamanhoChama = max(0.001, brilho * (1 - 0.6 * cera.abafamento))
         pivoChama.scale = [tamanhoChama * (1 - 0.05 * n2), tamanhoChama * (1 + 0.1 * n1), tamanhoChama]
         pivoChama.isEnabled = brilho > 0.02
+        alturaDaChamaNaTela = camera.alturaNaTela(pivo + cima * 0.012)
 
         // Brilho em volta: treme só um pouquinho
         luzChama.position = pivo + cima * 0.018 + SIMD3(0, 0, 0.02)
